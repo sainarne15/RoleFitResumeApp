@@ -3,14 +3,10 @@ import openai
 import anthropic
 from io import BytesIO
 import PyPDF2
-from docx import Document
-from docx.shared import Pt, RGBColor
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-import re
 from collections import Counter
+import re
+import json
+from datetime import datetime
 
 # Page config
 st.set_page_config(
@@ -30,6 +26,14 @@ if 'original_ats_score' not in st.session_state:
     st.session_state.original_ats_score = 0
 if 'enhanced_ats_score' not in st.session_state:
     st.session_state.enhanced_ats_score = 0
+if 'api_keys' not in st.session_state:
+    st.session_state.api_keys = {'openai': '', 'claude': ''}
+if 'history' not in st.session_state:
+    st.session_state.history = []
+if 'current_version' not in st.session_state:
+    st.session_state.current_version = 0
+if 'resume_filename' not in st.session_state:
+    st.session_state.resume_filename = ""
 
 
 # Helper Functions
@@ -59,7 +63,6 @@ def calculate_ats_score(resume_text, job_description):
     jd_lower = job_description.lower()
 
     # 1. Keyword Matching (40 points)
-    # Extract important words from job description (excluding common words)
     common_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
                     'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'be', 'been',
                     'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
@@ -69,7 +72,6 @@ def calculate_ats_score(resume_text, job_description):
     jd_words = [word for word in jd_words if len(word) > 2 and word not in common_words]
     jd_word_freq = Counter(jd_words)
 
-    # Get top keywords from job description
     top_keywords = [word for word, _ in jd_word_freq.most_common(30)]
 
     matched_keywords = sum(1 for keyword in top_keywords if keyword in resume_lower)
@@ -101,13 +103,12 @@ def calculate_ats_score(resume_text, job_description):
     score += action_verb_score
 
     # 4. Quantifiable Achievements (10 points)
-    # Look for numbers, percentages, dollar amounts
     numbers_pattern = r'\d+%|\$\d+|(\d+\+|\d+ years|\d+ months)'
     quantifiable_count = len(re.findall(numbers_pattern, resume_text))
     quantifiable_score = min(10, (quantifiable_count / 5) * 10)
     score += quantifiable_score
 
-    # 5. Resume Length (5 points) - optimal is 400-800 words
+    # 5. Resume Length (5 points)
     word_count = len(resume_text.split())
     if 400 <= word_count <= 800:
         length_score = 5
@@ -119,11 +120,11 @@ def calculate_ats_score(resume_text, job_description):
 
     # 6. Professional Formatting (5 points)
     format_score = 0
-    if re.search(r'[A-Z][a-z]+\s+[A-Z][a-z]+', resume_text):  # Has proper name format
+    if re.search(r'[A-Z][a-z]+\s+[A-Z][a-z]+', resume_text):
         format_score += 2
-    if '@' in resume_text:  # Has email
+    if '@' in resume_text:
         format_score += 1.5
-    if re.search(r'\d{3}[-.]?\d{3}[-.]?\d{4}', resume_text):  # Has phone
+    if re.search(r'\d{3}[-.]?\d{3}[-.]?\d{4}', resume_text):
         format_score += 1.5
     score += format_score
 
@@ -133,35 +134,62 @@ def calculate_ats_score(resume_text, job_description):
 def call_openai(resume, job_desc, model="gpt-4"):
     """Call OpenAI API to enhance resume"""
     try:
-        client = openai.OpenAI(api_key=st.session_state.openai_key)
+        client = openai.OpenAI(api_key=st.session_state.api_keys['openai'])
 
-        prompt = f"""You are an expert resume writer and ATS optimization specialist. 
+        original_word_count = len(resume.split())
+        original_line_count = len([line for line in resume.split('\n') if line.strip()])
+
+        prompt = f"""You are an expert resume writer and ATS optimization specialist with a focus on SURGICAL, MINIMAL changes.
 
 Job Description:
 {job_desc}
 
-Current Resume:
+Current Resume (Word count: {original_word_count}, Lines: {original_line_count}):
 {resume}
 
-Task: Enhance this resume to better match the job description and improve ATS score. Follow these guidelines:
-1. Keep all factual information accurate - DO NOT fabricate experience or skills
-2. Incorporate relevant keywords from the job description naturally
-3. Restructure bullet points to highlight relevant achievements
-4. Use action verbs and quantifiable results where possible
-5. Optimize formatting for ATS systems
-6. Maintain the original tone and professionalism
-7. Keep the same overall structure but improve content
+CRITICAL INSTRUCTIONS - READ CAREFULLY:
 
-Return ONLY the enhanced resume text, no additional commentary."""
+1. LENGTH PRESERVATION (MANDATORY):
+   - Target: EXACTLY {original_word_count} words (±30 words max)
+   - Target: EXACTLY {original_line_count} lines (±3 lines max)
+   - DO NOT add new bullet points that increase length
+   - If you enhance something, condense something else
+
+2. SELECTIVE ENHANCEMENT ONLY:
+   - Identify which bullet points/sections are ALREADY strong and relevant → LEAVE THEM EXACTLY AS IS
+   - Identify which bullet points are weak, generic, or irrelevant → ONLY modify these
+   - Do NOT change points that already have keywords, metrics, and relevance
+   - Change ONLY what needs changing - aim for 30-50% of content modified, not 100%
+
+3. WHAT TO MODIFY:
+   - Generic statements without metrics → Add quantifiable results
+   - Points missing job-relevant keywords → Weave in natural keywords
+   - Weak action verbs → Replace with stronger ones
+   - Irrelevant experiences → Make more concise or replace focus
+
+4. WHAT NOT TO MODIFY:
+   - Points that already match the job description well
+   - Statements that already have metrics and strong verbs
+   - Technical skills that are already listed clearly
+   - Contact information and headers
+
+5. PRESERVATION RULES:
+   - Keep the EXACT same structure (sections, job titles, dates)
+   - Maintain the same number of roles/positions
+   - Keep the same formatting style
+   - NO fabrication - only enhance existing truths
+
+Return ONLY the enhanced resume maintaining the same format and structure."""
 
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "You are an expert resume optimization assistant."},
+                {"role": "system",
+                 "content": "You are an expert resume optimizer who makes minimal, targeted changes."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.7,
-            max_tokens=2000
+            temperature=0.5,
+            max_tokens=2500
         )
 
         return response.choices[0].message.content.strip()
@@ -172,30 +200,56 @@ Return ONLY the enhanced resume text, no additional commentary."""
 def call_claude(resume, job_desc, model="claude-sonnet-4-20250514"):
     """Call Claude API to enhance resume"""
     try:
-        client = anthropic.Anthropic(api_key=st.session_state.claude_key)
+        client = anthropic.Anthropic(api_key=st.session_state.api_keys['claude'])
 
-        prompt = f"""You are an expert resume writer and ATS optimization specialist. 
+        original_word_count = len(resume.split())
+        original_line_count = len([line for line in resume.split('\n') if line.strip()])
+
+        prompt = f"""You are an expert resume writer and ATS optimization specialist with a focus on SURGICAL, MINIMAL changes.
 
 Job Description:
 {job_desc}
 
-Current Resume:
+Current Resume (Word count: {original_word_count}, Lines: {original_line_count}):
 {resume}
 
-Task: Enhance this resume to better match the job description and improve ATS score. Follow these guidelines:
-1. Keep all factual information accurate - DO NOT fabricate experience or skills
-2. Incorporate relevant keywords from the job description naturally
-3. Restructure bullet points to highlight relevant achievements
-4. Use action verbs and quantifiable results where possible
-5. Optimize formatting for ATS systems
-6. Maintain the original tone and professionalism
-7. Keep the same overall structure but improve content
+CRITICAL INSTRUCTIONS - READ CAREFULLY:
 
-Return ONLY the enhanced resume text, no additional commentary."""
+1. LENGTH PRESERVATION (MANDATORY):
+   - Target: EXACTLY {original_word_count} words (±30 words max)
+   - Target: EXACTLY {original_line_count} lines (±3 lines max)
+   - DO NOT add new bullet points that increase length
+   - If you enhance something, condense something else
+
+2. SELECTIVE ENHANCEMENT ONLY:
+   - Identify which bullet points/sections are ALREADY strong and relevant → LEAVE THEM EXACTLY AS IS
+   - Identify which bullet points are weak, generic, or irrelevant → ONLY modify these
+   - Do NOT change points that already have keywords, metrics, and relevance
+   - Change ONLY what needs changing - aim for 30-50% of content modified, not 100%
+
+3. WHAT TO MODIFY:
+   - Generic statements without metrics → Add quantifiable results
+   - Points missing job-relevant keywords → Weave in natural keywords
+   - Weak action verbs → Replace with stronger ones
+   - Irrelevant experiences → Make more concise or replace focus
+
+4. WHAT NOT TO MODIFY:
+   - Points that already match the job description well
+   - Statements that already have metrics and strong verbs
+   - Technical skills that are already listed clearly
+   - Contact information and headers
+
+5. PRESERVATION RULES:
+   - Keep the EXACT same structure (sections, job titles, dates)
+   - Maintain the same number of roles/positions
+   - Keep the same formatting style
+   - NO fabrication - only enhance existing truths
+
+Return ONLY the enhanced resume maintaining the same format and structure."""
 
         response = client.messages.create(
             model=model,
-            max_tokens=2000,
+            max_tokens=2500,
             messages=[
                 {"role": "user", "content": prompt}
             ]
@@ -206,66 +260,103 @@ Return ONLY the enhanced resume text, no additional commentary."""
         return f"Error calling Claude: {str(e)}"
 
 
-def create_pdf(text):
-    """Create PDF from text"""
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter,
-                            rightMargin=72, leftMargin=72,
-                            topMargin=72, bottomMargin=18)
-
-    styles = getSampleStyleSheet()
-    style = ParagraphStyle(
-        'CustomStyle',
-        parent=styles['Normal'],
-        fontSize=10,
-        leading=14,
-        spaceAfter=6,
-    )
-
-    story = []
-
-    # Split text into paragraphs
-    paragraphs = text.split('\n')
-    for para in paragraphs:
-        if para.strip():
-            # Clean text for PDF
-            para = para.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-            story.append(Paragraph(para, style))
-        else:
-            story.append(Spacer(1, 0.2 * inch))
-
-    doc.build(story)
-    buffer.seek(0)
-    return buffer
+def save_to_history(resume_text, score, version_num):
+    """Save resume version to history"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state.history.append({
+        'version': version_num,
+        'timestamp': timestamp,
+        'resume': resume_text,
+        'score': score,
+        'words': len(resume_text.split()),
+        'lines': len([l for l in resume_text.split('\n') if l.strip()])
+    })
 
 
-def create_word(text):
-    """Create Word document from text"""
-    doc = Document()
-
-    # Add paragraphs
-    for line in text.split('\n'):
-        if line.strip():
-            p = doc.add_paragraph(line)
-            # Set font
-            for run in p.runs:
-                run.font.name = 'Calibri'
-                run.font.size = Pt(11)
-        else:
-            doc.add_paragraph()
-
-    buffer = BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer
-
+# CSS for better styling
+st.markdown("""
+<style>
+    .stTextArea textarea {
+        font-family: 'Courier New', monospace;
+        font-size: 12px;
+    }
+    .history-item {
+        padding: 10px;
+        margin: 5px 0;
+        border-radius: 5px;
+        border: 1px solid #ddd;
+        cursor: pointer;
+    }
+    .history-item:hover {
+        background-color: #f0f0f0;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # Main App
-st.title("📄 Resume ATS Enhancer")
+st.title("📄 Role Fit Resume Pro")
 st.markdown("---")
 
-# Top Bar - Model Selection and API Keys
-col1, col2, col3 = st.columns([2, 2, 2])
+# Sidebar for API Keys and Settings
+with st.sidebar:
+    st.header("⚙️ Settings")
+
+    st.subheader("🔑 API Keys (Persistent)")
+
+    # OpenAI API Key
+    openai_key_input = st.text_input(
+        "OpenAI API Key",
+        value=st.session_state.api_keys['openai'],
+        type="password",
+        key="openai_key_sidebar",
+        help="Your API key will be saved for this session"
+    )
+    if openai_key_input:
+        st.session_state.api_keys['openai'] = openai_key_input
+        st.success("✅ OpenAI key saved")
+
+    # Claude API Key
+    claude_key_input = st.text_input(
+        "Claude API Key",
+        value=st.session_state.api_keys['claude'],
+        type="password",
+        key="claude_key_sidebar",
+        help="Your API key will be saved for this session"
+    )
+    if claude_key_input:
+        st.session_state.api_keys['claude'] = claude_key_input
+        st.success("✅ Claude key saved")
+
+    st.markdown("---")
+
+    # History Section
+    if st.session_state.history:
+        st.subheader("📜 Version History")
+        st.caption(f"Total versions: {len(st.session_state.history)}")
+
+        for idx, item in enumerate(reversed(st.session_state.history)):
+            with st.expander(f"V{item['version']} - Score: {item['score']} ({item['timestamp']})"):
+                st.write(f"**Words:** {item['words']} | **Lines:** {item['lines']}")
+                if st.button(f"Restore V{item['version']}", key=f"restore_{idx}"):
+                    st.session_state.enhanced_resume = item['resume']
+                    st.session_state.enhanced_ats_score = item['score']
+                    st.session_state.current_version = item['version']
+                    st.rerun()
+
+    st.markdown("---")
+
+    # Reset button
+    if st.button("🔄 Reset Session", type="secondary", use_container_width=True):
+        st.session_state.original_resume = ""
+        st.session_state.enhanced_resume = ""
+        st.session_state.job_description = ""
+        st.session_state.history = []
+        st.session_state.current_version = 0
+        st.session_state.resume_filename = ""
+        st.rerun()
+
+# Top Bar - Model Selection
+col1, col2 = st.columns([3, 3])
 
 with col1:
     llm_provider = st.selectbox(
@@ -287,16 +378,6 @@ with col2:
             ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-3-5-sonnet-20241022"],
             key="model"
         )
-
-with col3:
-    if "OpenAI" in llm_provider:
-        openai_key = st.text_input("OpenAI API Key", type="password", key="openai_key_input")
-        if openai_key:
-            st.session_state.openai_key = openai_key
-    else:
-        claude_key = st.text_input("Claude API Key", type="password", key="claude_key_input")
-        if claude_key:
-            st.session_state.claude_key = claude_key
 
 st.markdown("---")
 
@@ -322,14 +403,9 @@ if st.session_state.original_resume or st.session_state.enhanced_resume:
             enhanced_score = st.session_state.enhanced_ats_score
             score_color = "#ff4444" if enhanced_score < 50 else "#ffa500" if enhanced_score < 70 else "#00cc00"
 
-            # Calculate improvement
-            improvement = enhanced_score - original_score
-            improvement_text = f"+{improvement}" if improvement > 0 else f"{improvement}"
-            improvement_color = "#00cc00" if improvement > 0 else "#ff4444" if improvement < 0 else "#666"
-
             st.markdown(f"""
             <div style='text-align: center; padding: 20px; background-color: #f0f2f6; border-radius: 10px; border: 2px solid {score_color};'>
-                <h3 style='margin: 0; color: #333;'>Enhanced Resume</h3>
+                <h3 style='margin: 0; color: #333;'>Enhanced Resume (V{st.session_state.current_version})</h3>
                 <h1 style='margin: 10px 0; color: {score_color}; font-size: 48px;'>{enhanced_score}</h1>
                 <p style='margin: 0; color: #666;'>ATS Score</p>
             </div>
@@ -378,18 +454,27 @@ with col_upload1:
 
     if resume_option == "PDF":
         resume_file = st.file_uploader("Choose PDF file", type=['pdf'], key="resume_pdf")
-        if resume_file:
+        if resume_file and resume_file.name != st.session_state.resume_filename:
             st.session_state.original_resume = extract_text_from_pdf(resume_file)
+            st.session_state.resume_filename = resume_file.name
+            st.session_state.history = []  # Reset history on new upload
+            st.session_state.current_version = 0
+            st.session_state.enhanced_resume = ""
             if st.session_state.job_description:
                 st.session_state.original_ats_score = calculate_ats_score(
                     st.session_state.original_resume,
                     st.session_state.job_description
                 )
-            st.success("✅ Resume uploaded successfully!")
+            st.success("✅ Resume uploaded successfully! History reset.")
+            st.rerun()
     else:
         resume_text = st.text_area("Paste your resume text:", height=150, key="resume_text")
-        if resume_text:
+        if resume_text and resume_text != st.session_state.original_resume:
             st.session_state.original_resume = resume_text
+            st.session_state.history = []  # Reset history on new text
+            st.session_state.current_version = 0
+            st.session_state.enhanced_resume = ""
+            st.session_state.resume_filename = "text_input"
             if st.session_state.job_description:
                 st.session_state.original_ats_score = calculate_ats_score(
                     st.session_state.original_resume,
@@ -401,7 +486,6 @@ with col_upload2:
     job_desc = st.text_area("Paste the job description:", height=200, key="job_desc")
     if job_desc:
         st.session_state.job_description = job_desc
-        # Recalculate scores if resume already exists
         if st.session_state.original_resume:
             st.session_state.original_ats_score = calculate_ats_score(
                 st.session_state.original_resume,
@@ -423,12 +507,12 @@ with col_btn1:
             st.error("❌ Please upload your resume first!")
         elif not st.session_state.job_description:
             st.error("❌ Please provide a job description!")
-        elif "OpenAI" in llm_provider and not st.session_state.get('openai_key'):
-            st.error("❌ Please provide your OpenAI API key!")
-        elif "Claude" in llm_provider and not st.session_state.get('claude_key'):
-            st.error("❌ Please provide your Claude API key!")
+        elif "OpenAI" in llm_provider and not st.session_state.api_keys['openai']:
+            st.error("❌ Please provide your OpenAI API key in the sidebar!")
+        elif "Claude" in llm_provider and not st.session_state.api_keys['claude']:
+            st.error("❌ Please provide your Claude API key in the sidebar!")
         else:
-            with st.spinner("✨ Enhancing your resume..."):
+            with st.spinner("✨ Enhancing your resume with minimal targeted changes..."):
                 if "OpenAI" in llm_provider:
                     result = call_openai(
                         st.session_state.original_resume,
@@ -443,18 +527,25 @@ with col_btn1:
                     )
 
                 st.session_state.enhanced_resume = result
-                # Calculate ATS score for enhanced resume
                 st.session_state.enhanced_ats_score = calculate_ats_score(
                     st.session_state.enhanced_resume,
                     st.session_state.job_description
                 )
+                st.session_state.current_version += 1
+                save_to_history(result, st.session_state.enhanced_ats_score, st.session_state.current_version)
                 st.success("✅ Resume enhanced successfully!")
                 st.rerun()
 
 with col_btn2:
     if st.button("🔄 Retry Enhancement", use_container_width=True):
-        if st.session_state.enhanced_resume:
-            with st.spinner("✨ Re-enhancing your resume..."):
+        if not st.session_state.original_resume or not st.session_state.job_description:
+            st.warning("⚠️ Please upload resume and job description first!")
+        elif "OpenAI" in llm_provider and not st.session_state.api_keys['openai']:
+            st.error("❌ Please provide your OpenAI API key in the sidebar!")
+        elif "Claude" in llm_provider and not st.session_state.api_keys['claude']:
+            st.error("❌ Please provide your Claude API key in the sidebar!")
+        else:
+            with st.spinner("✨ Generating new version..."):
                 if "OpenAI" in llm_provider:
                     result = call_openai(
                         st.session_state.original_resume,
@@ -469,15 +560,14 @@ with col_btn2:
                     )
 
                 st.session_state.enhanced_resume = result
-                # Recalculate ATS score
                 st.session_state.enhanced_ats_score = calculate_ats_score(
                     st.session_state.enhanced_resume,
                     st.session_state.job_description
                 )
-                st.success("✅ Resume re-enhanced successfully!")
+                st.session_state.current_version += 1
+                save_to_history(result, st.session_state.enhanced_ats_score, st.session_state.current_version)
+                st.success("✅ New version generated!")
                 st.rerun()
-        else:
-            st.warning("⚠️ Please enhance the resume first!")
 
 with col_btn3:
     st.write("")  # Spacing
@@ -486,11 +576,32 @@ with col_btn3:
 st.markdown("---")
 st.subheader("📊 Compare Resumes")
 
-# Create three columns
+# Length comparison info
+if st.session_state.original_resume:
+    orig_words = len(st.session_state.original_resume.split())
+    orig_lines = len([l for l in st.session_state.original_resume.split('\n') if l.strip()])
+
+    if st.session_state.enhanced_resume:
+        enh_words = len(st.session_state.enhanced_resume.split())
+        enh_lines = len([l for l in st.session_state.enhanced_resume.split('\n') if l.strip()])
+
+        col_info1, col_info2, col_info3 = st.columns([1, 1, 1])
+        with col_info1:
+            st.info(f"📏 **Original:** {orig_words} words, {orig_lines} lines")
+        with col_info2:
+            st.info(f"📏 **Enhanced V{st.session_state.current_version}:** {enh_words} words, {enh_lines} lines")
+        with col_info3:
+            word_diff = enh_words - orig_words
+            line_diff = enh_lines - orig_lines
+            diff_color = "🟢" if abs(word_diff) <= 30 else "🟡" if abs(word_diff) <= 50 else "🔴"
+            st.info(f"{diff_color} **Difference:** {word_diff:+d} words, {line_diff:+d} lines")
+    else:
+        st.info(f"📏 **Original Resume:** {orig_words} words, {orig_lines} lines")
+
+# Create two columns
 left_col, right_col = st.columns([1, 1])
 
 with left_col:
-    # Job Description (Top)
     st.markdown("### 📋 Job Description")
     with st.container():
         st.text_area(
@@ -504,7 +615,6 @@ with left_col:
 
     st.markdown("---")
 
-    # Original Resume (Bottom)
     st.markdown("### 📄 Original Resume")
     with st.container():
         st.text_area(
@@ -517,7 +627,7 @@ with left_col:
         )
 
 with right_col:
-    st.markdown("### ✨ Enhanced Resume")
+    st.markdown(f"### ✨ Enhanced Resume (Version {st.session_state.current_version})")
     with st.container():
         enhanced_text = st.text_area(
             "Enhanced Resume",
@@ -527,7 +637,6 @@ with right_col:
             label_visibility="collapsed"
         )
 
-        # Update session state if user edits
         if enhanced_text != st.session_state.enhanced_resume:
             st.session_state.enhanced_resume = enhanced_text
 
@@ -536,34 +645,32 @@ if st.session_state.enhanced_resume:
     st.markdown("---")
     st.subheader("💾 Download Enhanced Resume")
 
-    col_dl1, col_dl2, col_dl3 = st.columns([1, 1, 2])
+    col_dl1, col_dl2 = st.columns([1, 1])
 
     with col_dl1:
-        pdf_buffer = create_pdf(st.session_state.enhanced_resume)
+        # Plain text download
         st.download_button(
-            label="📥 Download as PDF",
-            data=pdf_buffer,
-            file_name="enhanced_resume.pdf",
-            mime="application/pdf",
-            use_container_width=True
+            label="📥 Download as Text (.txt)",
+            data=st.session_state.enhanced_resume,
+            file_name=f"enhanced_resume_v{st.session_state.current_version}.txt",
+            mime="text/plain",
+            use_container_width=True,
+            help="Download as plain text to maintain exact formatting"
         )
 
     with col_dl2:
-        word_buffer = create_word(st.session_state.enhanced_resume)
-        st.download_button(
-            label="📥 Download as Word",
-            data=word_buffer,
-            file_name="enhanced_resume.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            use_container_width=True
-        )
+        # Copy to clipboard info
+        st.info(
+            "💡 **Tip:** Copy the enhanced resume text and paste it into your original resume document to maintain formatting!")
 
 # Footer
 st.markdown("---")
 st.markdown(
     """
     <div style='text-align: center; color: #666; padding: 20px;'>
-        <p>💡 <strong>Tip:</strong> Always review the enhanced resume to ensure accuracy before using it for applications.</p>
+        <p>💡 <strong>Smart Enhancement:</strong> The app makes MINIMAL, TARGETED changes - only enhancing weak points while preserving strong ones.</p>
+        <p>📝 <strong>Formatting Tip:</strong> Copy the enhanced text and paste it into your original document to preserve exact formatting, fonts, and layout.</p>
+        <p>🔄 <strong>Version History:</strong> Access previous versions from the sidebar to compare and restore any version you prefer.</p>
         <p><strong>📊 ATS Score Guide:</strong> 
             <span style='color: #00cc00;'>70-100 = Excellent</span> | 
             <span style='color: #ffa500;'>50-69 = Good</span> | 
@@ -572,7 +679,7 @@ st.markdown(
         <p style='font-size: 11px; margin-top: 10px;'>
             <strong>Score Factors:</strong> Keyword Match (40%) • Essential Sections (25%) • Action Verbs (15%) • Quantifiable Results (10%) • Length (5%) • Formatting (5%)
         </p>
-        <p style='font-size: 12px;'>Made with ❤️ for job seekers by NARNE| Powered by AI</p>
+        <p style='font-size: 12px; margin-top: 15px;'>Made with ❤️ for job seekers by MONARCH15 | Powered by AI</p>
     </div>
     """,
     unsafe_allow_html=True
