@@ -7,10 +7,11 @@ from collections import Counter
 import re
 import json
 from datetime import datetime
+import difflib
 
 # Page config
 st.set_page_config(
-    page_title="Resume ATS Enhancer",
+    page_title="Role Fit Resume",
     page_icon="📄",
     layout="wide"
 )
@@ -273,6 +274,63 @@ def save_to_history(resume_text, score, version_num):
     })
 
 
+def highlight_changes(original_text, enhanced_text):
+    """Highlight changes between original and enhanced text using word-level diff"""
+    if not original_text or not enhanced_text:
+        return enhanced_text
+
+    # Split into lines
+    original_lines = original_text.split('\n')
+    enhanced_lines = enhanced_text.split('\n')
+
+    # Create a differ
+    differ = difflib.Differ()
+
+    result_html = []
+
+    # Compare line by line
+    for orig_line, enh_line in zip(original_lines, enhanced_lines):
+        if orig_line.strip() == enh_line.strip():
+            # Line unchanged
+            result_html.append(enh_line)
+        else:
+            # Line changed - do word-level comparison
+            orig_words = orig_line.split()
+            enh_words = enh_line.split()
+
+            # Use SequenceMatcher for word-level diff
+            matcher = difflib.SequenceMatcher(None, orig_words, enh_words)
+
+            line_result = []
+            for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                if tag == 'equal':
+                    # Words unchanged
+                    line_result.append(' '.join(enh_words[j1:j2]))
+                elif tag == 'replace':
+                    # Words replaced - show new in green
+                    replaced_text = ' '.join(enh_words[j1:j2])
+                    line_result.append(
+                        f'<span style="background-color: #90EE90; color: #000; padding: 2px 4px; border-radius: 3px;">{replaced_text}</span>')
+                elif tag == 'insert':
+                    # Words added - show in green
+                    inserted_text = ' '.join(enh_words[j1:j2])
+                    line_result.append(
+                        f'<span style="background-color: #90EE90; color: #000; padding: 2px 4px; border-radius: 3px;">{inserted_text}</span>')
+                elif tag == 'delete':
+                    # Words deleted from original - don't show in enhanced
+                    pass
+
+            result_html.append(' '.join(line_result))
+
+    # Handle case where enhanced has more lines
+    if len(enhanced_lines) > len(original_lines):
+        for line in enhanced_lines[len(original_lines):]:
+            result_html.append(
+                f'<span style="background-color: #90EE90; color: #000; padding: 2px 4px; border-radius: 3px;">{line}</span>')
+
+    return '\n'.join(result_html)
+
+
 # CSS for better styling
 st.markdown("""
 <style>
@@ -290,11 +348,23 @@ st.markdown("""
     .history-item:hover {
         background-color: #f0f0f0;
     }
+    .enhanced-display {
+        font-family: 'Courier New', monospace;
+        font-size: 12px;
+        line-height: 1.6;
+        white-space: pre-wrap;
+        background-color: #f8f9fa;
+        padding: 15px;
+        border-radius: 5px;
+        border: 1px solid #dee2e6;
+        max-height: 580px;
+        overflow-y: auto;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # Main App
-st.title("📄 Role Fit Resume Pro")
+st.title("📄 Resume ATS Enhancer Pro")
 st.markdown("---")
 
 # Sidebar for API Keys and Settings
@@ -628,17 +698,48 @@ with left_col:
 
 with right_col:
     st.markdown(f"### ✨ Enhanced Resume (Version {st.session_state.current_version})")
-    with st.container():
-        enhanced_text = st.text_area(
-            "Enhanced Resume",
-            value=st.session_state.enhanced_resume,
-            height=580,
-            key="enhanced_display",
-            label_visibility="collapsed"
-        )
 
-        if enhanced_text != st.session_state.enhanced_resume:
-            st.session_state.enhanced_resume = enhanced_text
+    # Toggle for showing highlights
+    col_toggle1, col_toggle2 = st.columns([3, 1])
+    with col_toggle1:
+        show_highlights = st.checkbox("🎨 Show Changes Highlighted", value=True, key="show_highlights")
+    with col_toggle2:
+        st.write("")
+
+    with st.container():
+        if st.session_state.enhanced_resume:
+            if show_highlights:
+                # Show highlighted version
+                highlighted_text = highlight_changes(
+                    st.session_state.original_resume,
+                    st.session_state.enhanced_resume
+                )
+                st.markdown(
+                    f'<div class="enhanced-display">{highlighted_text}</div>',
+                    unsafe_allow_html=True
+                )
+                st.caption("🟢 Green = Modified or Added Content")
+            else:
+                # Show plain editable version
+                enhanced_text = st.text_area(
+                    "Enhanced Resume",
+                    value=st.session_state.enhanced_resume,
+                    height=580,
+                    key="enhanced_display",
+                    label_visibility="collapsed"
+                )
+
+                if enhanced_text != st.session_state.enhanced_resume:
+                    st.session_state.enhanced_resume = enhanced_text
+        else:
+            st.text_area(
+                "Enhanced Resume",
+                value="",
+                height=580,
+                key="enhanced_display_empty",
+                label_visibility="collapsed",
+                placeholder="Enhanced resume will appear here..."
+            )
 
 # Download Section
 if st.session_state.enhanced_resume:
@@ -679,7 +780,7 @@ st.markdown(
         <p style='font-size: 11px; margin-top: 10px;'>
             <strong>Score Factors:</strong> Keyword Match (40%) • Essential Sections (25%) • Action Verbs (15%) • Quantifiable Results (10%) • Length (5%) • Formatting (5%)
         </p>
-        <p style='font-size: 12px; margin-top: 15px;'>Made with ❤️ for job seekers by MONARCH15 | Powered by AI</p>
+        <p style='font-size: 12px; margin-top: 15px;'>Made with ❤️ by MONARCH15| Powered by AI</p>
     </div>
     """,
     unsafe_allow_html=True
