@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components  # NEW: for the browser-side Puter.js widget
 import openai
 import anthropic
 from io import BytesIO
@@ -17,6 +18,41 @@ st.set_page_config(
     page_icon="📄",
     layout="wide"
 )
+
+# ---- Curated fallback models for Puter (used if live fetch fails or no key) ----
+PUTER_MODELS_FALLBACK = [
+    # OpenAI family routed by Puter
+    "gpt-5-nano", "gpt-5-mini", "gpt-5", "gpt-5-chat-latest",
+    "gpt-4o", "gpt-4o-mini",
+    "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano",
+    "gpt-4.5-preview",
+    "o1", "o1-mini", "o1-pro", "o3", "o3-mini", "o4-mini",
+    # Anthropic family
+    "claude-3-7-sonnet", "claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5",
+]
+
+@st.cache_data(ttl=3600)
+def fetch_puter_models(api_key: str):
+    """Try to fetch full model list from Puter; fallback to curated list."""
+    try:
+        if not api_key:
+            return PUTER_MODELS_FALLBACK
+        resp = requests.get(
+            "https://api.puter.com/v1/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=20
+        )
+        if resp.status_code != 200:
+            return PUTER_MODELS_FALLBACK
+        data = resp.json()
+        ids = [m.get("id") for m in data.get("data", []) if m.get("id")]
+        if not ids:
+            return PUTER_MODELS_FALLBACK
+        preferred_first = [m for m in PUTER_MODELS_FALLBACK if m in ids]
+        others = [m for m in ids if m not in preferred_first]
+        return preferred_first + others
+    except Exception:
+        return PUTER_MODELS_FALLBACK
 
 # Initialize session state
 if 'original_resume' not in st.session_state:
@@ -37,7 +73,6 @@ if 'current_version' not in st.session_state:
     st.session_state.current_version = 0
 if 'resume_filename' not in st.session_state:
     st.session_state.resume_filename = ""
-
 
 # Helper Functions
 def extract_text_from_pdf(pdf_file):
@@ -62,7 +97,6 @@ def extract_text_from_pdf(pdf_file):
         st.error(f"Error reading PDF: {str(e)}")
         return ""
 
-
 def extract_text_from_word(docx_file):
     """Extract text from uploaded Word document"""
     try:
@@ -85,7 +119,6 @@ def extract_text_from_word(docx_file):
     except Exception as e:
         st.error(f"Error reading Word document: {str(e)}")
         return ""
-
 
 def calculate_ats_score(resume_text, job_description):
     """Calculate ATS score based on multiple factors"""
@@ -167,11 +200,12 @@ def calculate_ats_score(resume_text, job_description):
 
     return round(min(score, max_score), 1)
 
-
-def call_puter(resume, job_desc, model="gpt-4o"):
-    """Call Puter AI API (free proxy for OpenAI and Claude)"""
+def call_puter(resume, job_desc, model="gpt-5-nano"):
+    """Server-side Puter REST call (OpenAI-compatible). Requires a Puter API key."""
     try:
-        api_key = st.session_state.api_keys['puter']
+        api_key = st.session_state.api_keys.get('puter', '').strip()
+        if not api_key:
+            return "Error: Puter API key is required for server-side calls."
 
         original_word_count = len(resume.split())
         original_line_count = len([line for line in resume.split('\n') if line.strip()])
@@ -185,73 +219,38 @@ Current Resume (Word count: {original_word_count}, Lines: {original_line_count})
 {resume}
 
 CRITICAL INSTRUCTIONS - READ CAREFULLY:
+1) LENGTH: Target exactly {original_word_count}±30 words and {original_line_count}±3 lines. If you add, condense elsewhere.
+2) SELECTIVE changes: Improve only weak/irrelevant bullets; leave strong ones untouched.
+3) MODIFY: add metrics, weave relevant JD keywords, upgrade weak verbs, compress irrelevant parts.
+4) DO NOT FABRICATE; preserve sections/titles/dates/formatting.
+Return ONLY the enhanced resume with the same structure.
+"""
 
-1. LENGTH PRESERVATION (MANDATORY):
-   - Target: EXACTLY {original_word_count} words (±30 words max)
-   - Target: EXACTLY {original_line_count} lines (±3 lines max)
-   - DO NOT add new bullet points that increase length
-   - If you enhance something, condense something else
-
-2. SELECTIVE ENHANCEMENT ONLY:
-   - Identify which bullet points/sections are ALREADY strong and relevant → LEAVE THEM EXACTLY AS IS
-   - Identify which bullet points are weak, generic, or irrelevant → ONLY modify these
-   - Do NOT change points that already have keywords, metrics, and relevance
-   - Change ONLY what needs changing - aim for 30-50% of content modified, not 100%
-
-3. WHAT TO MODIFY:
-   - Generic statements without metrics → Add quantifiable results
-   - Points missing job-relevant keywords → Weave in natural keywords
-   - Weak action verbs → Replace with stronger ones
-   - Irrelevant experiences → Make more concise or replace focus
-
-4. WHAT NOT TO MODIFY:
-   - Points that already match the job description well
-   - Statements that already have metrics and strong verbs
-   - Technical skills that are already listed clearly
-   - Contact information and headers
-
-5. PRESERVATION RULES:
-   - Keep the EXACT same structure (sections, job titles, dates)
-   - Maintain the same number of roles/positions
-   - Keep the same formatting style
-   - NO fabrication - only enhance existing truths
-
-Return ONLY the enhanced resume maintaining the same format and structure."""
-
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
-        }
-
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
         payload = {
             "model": model,
             "messages": [
-                {"role": "system",
-                 "content": "You are an expert resume optimizer who makes minimal, targeted changes."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": "You are an expert resume optimizer who makes minimal, targeted changes."},
+                {"role": "user", "content": prompt},
             ],
             "temperature": 0.5,
-            "max_tokens": 2500
+            "max_tokens": 2500,
         }
 
-        response = requests.post(
-            "https://api.puter.com/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=60
-        )
-
-        if response.status_code == 200:
-            result = response.json()
-            return result['choices'][0]['message']['content'].strip()
+        resp = requests.post("https://api.puter.com/v1/chat/completions", headers=headers, json=payload, timeout=90)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data["choices"][0]["message"]["content"].strip()
         else:
-            return f"Error calling Puter AI: {response.status_code} - {response.text}"
+            return f"Error calling Puter AI: {resp.status_code} - {resp.text}"
 
     except Exception as e:
         return f"Error calling Puter AI: {str(e)}"
-    """Call OpenAI API to enhance resume"""
+
+def call_openai(resume, job_desc, model="gpt-4o"):
+    """Direct OpenAI call."""
     try:
-        client = openai.OpenAI(api_key=st.session_state.api_keys['openai'])
+        client = openai.OpenAI(api_key=st.session_state.api_keys.get('openai', '').strip())
 
         original_word_count = len(resume.split())
         original_line_count = len([line for line in resume.split('\n') if line.strip()])
@@ -265,54 +264,25 @@ Current Resume (Word count: {original_word_count}, Lines: {original_line_count})
 {resume}
 
 CRITICAL INSTRUCTIONS - READ CAREFULLY:
-
-1. LENGTH PRESERVATION (MANDATORY):
-   - Target: EXACTLY {original_word_count} words (±30 words max)
-   - Target: EXACTLY {original_line_count} lines (±3 lines max)
-   - DO NOT add new bullet points that increase length
-   - If you enhance something, condense something else
-
-2. SELECTIVE ENHANCEMENT ONLY:
-   - Identify which bullet points/sections are ALREADY strong and relevant → LEAVE THEM EXACTLY AS IS
-   - Identify which bullet points are weak, generic, or irrelevant → ONLY modify these
-   - Do NOT change points that already have keywords, metrics, and relevance
-   - Change ONLY what needs changing - aim for 30-50% of content modified, not 100%
-
-3. WHAT TO MODIFY:
-   - Generic statements without metrics → Add quantifiable results
-   - Points missing job-relevant keywords → Weave in natural keywords
-   - Weak action verbs → Replace with stronger ones
-   - Irrelevant experiences → Make more concise or replace focus
-
-4. WHAT NOT TO MODIFY:
-   - Points that already match the job description well
-   - Statements that already have metrics and strong verbs
-   - Technical skills that are already listed clearly
-   - Contact information and headers
-
-5. PRESERVATION RULES:
-   - Keep the EXACT same structure (sections, job titles, dates)
-   - Maintain the same number of roles/positions
-   - Keep the same formatting style
-   - NO fabrication - only enhance existing truths
-
-Return ONLY the enhanced resume maintaining the same format and structure."""
+1) LENGTH: Target exactly {original_word_count}±30 words and {original_line_count}±3 lines. If you add, condense elsewhere.
+2) SELECTIVE changes: Improve only weak/irrelevant bullets; leave strong ones untouched.
+3) MODIFY: add metrics, weave relevant JD keywords, upgrade weak verbs, compress irrelevant parts.
+4) DO NOT FABRICATE; preserve sections/titles/dates/formatting.
+Return ONLY the enhanced resume with the same structure.
+"""
 
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system",
-                 "content": "You are an expert resume optimizer who makes minimal, targeted changes."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": "You are an expert resume optimizer who makes minimal, targeted changes."},
+                {"role": "user", "content": prompt},
             ],
             temperature=0.5,
-            max_tokens=2500
+            max_tokens=2500,
         )
-
         return response.choices[0].message.content.strip()
     except Exception as e:
         return f"Error calling OpenAI: {str(e)}"
-
 
 def call_claude(resume, job_desc, model="claude-sonnet-4-20250514"):
     """Call Claude API to enhance resume"""
@@ -331,38 +301,12 @@ Current Resume (Word count: {original_word_count}, Lines: {original_line_count})
 {resume}
 
 CRITICAL INSTRUCTIONS - READ CAREFULLY:
-
-1. LENGTH PRESERVATION (MANDATORY):
-   - Target: EXACTLY {original_word_count} words (±30 words max)
-   - Target: EXACTLY {original_line_count} lines (±3 lines max)
-   - DO NOT add new bullet points that increase length
-   - If you enhance something, condense something else
-
-2. SELECTIVE ENHANCEMENT ONLY:
-   - Identify which bullet points/sections are ALREADY strong and relevant → LEAVE THEM EXACTLY AS IS
-   - Identify which bullet points are weak, generic, or irrelevant → ONLY modify these
-   - Do NOT change points that already have keywords, metrics, and relevance
-   - Change ONLY what needs changing - aim for 30-50% of content modified, not 100%
-
-3. WHAT TO MODIFY:
-   - Generic statements without metrics → Add quantifiable results
-   - Points missing job-relevant keywords → Weave in natural keywords
-   - Weak action verbs → Replace with stronger ones
-   - Irrelevant experiences → Make more concise or replace focus
-
-4. WHAT NOT TO MODIFY:
-   - Points that already match the job description well
-   - Statements that already have metrics and strong verbs
-   - Technical skills that are already listed clearly
-   - Contact information and headers
-
-5. PRESERVATION RULES:
-   - Keep the EXACT same structure (sections, job titles, dates)
-   - Maintain the same number of roles/positions
-   - Keep the same formatting style
-   - NO fabrication - only enhance existing truths
-
-Return ONLY the enhanced resume maintaining the same format and structure."""
+1) LENGTH: Target exactly {original_word_count}±30 words and {original_line_count}±3 lines. If you add, condense elsewhere.
+2) SELECTIVE changes: Improve only weak/irrelevant bullets; leave strong ones untouched.
+3) MODIFY: add metrics, weave relevant JD keywords, upgrade weak verbs, compress irrelevant parts.
+4) DO NOT FABRICATE; preserve sections/titles/dates/formatting.
+Return ONLY the enhanced resume with the same structure.
+"""
 
         response = client.messages.create(
             model=model,
@@ -376,7 +320,6 @@ Return ONLY the enhanced resume maintaining the same format and structure."""
     except Exception as e:
         return f"Error calling Claude: {str(e)}"
 
-
 def save_to_history(resume_text, score, version_num):
     """Save resume version to history"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -388,7 +331,6 @@ def save_to_history(resume_text, score, version_num):
         'words': len(resume_text.split()),
         'lines': len([l for l in resume_text.split('\n') if l.strip()])
     })
-
 
 def highlight_changes(original_text, enhanced_text):
     """Highlight changes between original and enhanced text using improved diff algorithm"""
@@ -410,22 +352,17 @@ def highlight_changes(original_text, enhanced_text):
 
     for tag, i1, i2, j1, j2 in line_matcher.get_opcodes():
         if tag == 'equal':
-            # Lines are identical
             for line in enhanced_lines[j1:j2]:
                 result_html.append(line)
 
         elif tag == 'replace':
-            # Lines were modified - do word-level comparison
             for orig_idx, enh_idx in zip(range(i1, i2), range(j1, j2)):
                 if orig_idx < len(original_lines) and enh_idx < len(enhanced_lines):
                     orig_line = original_lines[orig_idx]
                     enh_line = enhanced_lines[enh_idx]
-
-                    # If lines are very similar (>70% match), do word-level diff
                     similarity = difflib.SequenceMatcher(None, orig_line, enh_line).ratio()
 
-                    if similarity > 0.3:  # Lines are somewhat related
-                        # Word-level comparison
+                    if similarity > 0.3:
                         orig_words = orig_line.split()
                         enh_words = enh_line.split()
 
@@ -439,29 +376,27 @@ def highlight_changes(original_text, enhanced_text):
                                 changed_text = ' '.join(enh_words[wj1:wj2])
                                 if changed_text.strip():
                                     line_parts.append(
-                                        f'<span style="background-color: #90EE90; font-weight: 500; padding: 1px 3px; border-radius: 2px;">{changed_text}</span>')
-
+                                        f'<span style="background-color: #90EE90; font-weight: 500; padding: 1px 3px; border-radius: 2px;">{changed_text}</span>'
+                                    )
                         result_html.append(' '.join(line_parts) if line_parts else enh_line)
                     else:
-                        # Lines are very different - highlight entire new line
                         result_html.append(
-                            f'<span style="background-color: #90EE90; font-weight: 500; padding: 1px 3px; border-radius: 2px;">{enh_line}</span>')
+                            f'<span style="background-color: #90EE90; font-weight: 500; padding: 1px 3px; border-radius: 2px;">{enh_line}</span>'
+                        )
 
         elif tag == 'insert':
-            # New lines added
             for line in enhanced_lines[j1:j2]:
                 if line.strip():
                     result_html.append(
-                        f'<span style="background-color: #90EE90; font-weight: 500; padding: 1px 3px; border-radius: 2px;">{line}</span>')
+                        f'<span style="background-color: #90EE90; font-weight: 500; padding: 1px 3px; border-radius: 2px;">{line}</span>'
+                    )
                 else:
                     result_html.append(line)
 
         elif tag == 'delete':
-            # Lines were deleted (don't show in enhanced version)
             pass
 
     return '\n'.join(result_html)
-
 
 # CSS for better styling
 st.markdown("""
@@ -509,7 +444,7 @@ with st.sidebar:
     api_provider = st.radio(
         "Select API Provider:",
         ["Puter AI (Free)", "OpenAI (Direct)", "Anthropic Claude (Direct)"],
-        help="Puter AI provides free access to GPT and Claude models"
+        help="Puter AI provides free access to GPT and Claude models (server-side needs a key; browser-side widget needs no key)."
     )
 
     if api_provider == "Puter AI (Free)":
@@ -519,13 +454,13 @@ with st.sidebar:
             value=st.session_state.api_keys['puter'],
             type="password",
             key="puter_key_sidebar",
-            help="Get free API key from https://puter.com"
+            help="Get a free key at puter.com. Not needed for the Advanced → Puter.js (browser) widget."
         )
         if puter_key_input:
             st.session_state.api_keys['puter'] = puter_key_input
             st.success("✅ Puter key saved")
 
-        st.info("💡 Puter AI provides FREE access to GPT-4, Claude, and other models. Sign up at puter.com")
+        st.info("💡 Puter AI can be used server-side (with key) or via the in-browser widget (no key).")
 
     elif api_provider == "OpenAI (Direct)":
         # OpenAI API Key
@@ -593,11 +528,14 @@ with col1:
 
 with col2:
     if "Puter" in llm_provider:
+        _models_list = fetch_puter_models(st.session_state.api_keys.get('puter', ''))
+        default_idx = _models_list.index("gpt-5-nano") if "gpt-5-nano" in _models_list else 0
         model_choice = st.selectbox(
             "Select Model",
-            ["gpt-4o", "gpt-4-turbo", "claude-3-5-sonnet-20241022", "gpt-3.5-turbo"],
+            _models_list,
+            index=default_idx,
             key="model",
-            help="All models available through Puter AI for free"
+            help="Models routed by Puter to multiple providers. No key needed for the browser-side widget."
         )
     elif "OpenAI" in llm_provider:
         model_choice = st.selectbox(
@@ -760,7 +698,7 @@ with col_btn1:
         elif not st.session_state.job_description:
             st.error("❌ Please provide a job description!")
         elif "Puter" in llm_provider and not st.session_state.api_keys['puter']:
-            st.error("❌ Please provide your Puter AI API key in the sidebar!")
+            st.error("❌ Please provide your Puter AI API key in the sidebar for server-side calls (or use the Advanced → Puter.js widget below).")
         elif "OpenAI" in llm_provider and not st.session_state.api_keys['openai']:
             st.error("❌ Please provide your OpenAI API key in the sidebar!")
         elif "Claude" in llm_provider and not st.session_state.api_keys['claude']:
@@ -801,7 +739,7 @@ with col_btn2:
         if not st.session_state.original_resume or not st.session_state.job_description:
             st.warning("⚠️ Please upload resume and job description first!")
         elif "Puter" in llm_provider and not st.session_state.api_keys['puter']:
-            st.error("❌ Please provide your Puter AI API key in the sidebar!")
+            st.error("❌ Please provide your Puter AI API key in the sidebar for server-side calls (or use the Advanced → Puter.js widget below).")
         elif "OpenAI" in llm_provider and not st.session_state.api_keys['openai']:
             st.error("❌ Please provide your OpenAI API key in the sidebar!")
         elif "Claude" in llm_provider and not st.session_state.api_keys['claude']:
@@ -907,7 +845,6 @@ with right_col:
     with st.container():
         if st.session_state.enhanced_resume:
             if show_highlights:
-                # Show highlighted version
                 highlighted_text = highlight_changes(
                     st.session_state.original_resume,
                     st.session_state.enhanced_resume
@@ -918,7 +855,6 @@ with right_col:
                 )
                 st.caption("🟢 Green = Modified or Added Content")
             else:
-                # Show plain editable version
                 enhanced_text = st.text_area(
                     "Enhanced Resume",
                     value=st.session_state.enhanced_resume,
@@ -938,6 +874,152 @@ with right_col:
                 label_visibility="collapsed",
                 placeholder="Enhanced resume will appear here..."
             )
+
+    # ---- Advanced: Browser-side Puter.js (no API key) ----
+    with st.expander("⚡ Advanced: Run Puter.js in your browser (no API key)"):
+        st.caption("This uses Puter.js directly in your browser. Click Run, then Copy and paste the output below, and press “Use this result”.")
+        _owc = len(st.session_state.original_resume.split()) if st.session_state.original_resume else 0
+        _olc = len([l for l in st.session_state.original_resume.split('\n') if l.strip()]) if st.session_state.original_resume else 0
+        _prompt = f"""You are an expert resume writer and ATS optimization specialist with a focus on SURGICAL, MINIMAL changes.
+
+Job Description:
+{st.session_state.job_description}
+
+Current Resume (Word count: {_owc}, Lines: {_olc}):
+{st.session_state.original_resume}
+
+CRITICAL INSTRUCTIONS - READ CAREFULLY:
+1) LENGTH: Target exactly {_owc}±30 words and {_olc}±3 lines. If you add, condense elsewhere.
+2) SELECTIVE changes: Improve only weak/irrelevant bullets; leave strong ones untouched.
+3) MODIFY: add metrics, weave relevant JD keywords, upgrade weak verbs, compress irrelevant parts.
+4) DO NOT FABRICATE; preserve sections/titles/dates/formatting.
+Return ONLY the enhanced resume with the same structure.
+"""
+
+        # Build a stable list once
+        _puter_models_for_frontend = fetch_puter_models(st.session_state.api_keys.get('puter', '')) or PUTER_MODELS_FALLBACK
+        default_frontend_model = model_choice if "Puter" in llm_provider and model_choice in _puter_models_for_frontend else "gpt-5-nano"
+        try:
+            default_frontend_index = _puter_models_for_frontend.index(default_frontend_model)
+        except ValueError:
+            default_frontend_index = 0
+
+        frontend_model = st.selectbox(
+            "Puter.js model (browser-side)",
+            _puter_models_for_frontend,
+            index=default_frontend_index,
+            key="puter_js_model"
+        )
+
+        components.html(f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8" />
+          <script src="https://js.puter.com/v2/"></script>
+          <style>
+            body {{ font-family: sans-serif; }}
+            .btn {{ padding: 8px 12px; border: 1px solid #888; border-radius: 6px; background:#f5f5f5; cursor:pointer; margin-right:8px; }}
+            .out {{ width:100%; height:260px; white-space:pre-wrap; }}
+            .row {{ margin: 6px 0; }}
+          </style>
+        </head>
+        <body>
+          <div class="row">
+            <button class="btn" id="signin">🔐 Sign in to Puter</button>
+            <span id="status">Not signed in</span>
+          </div>
+          <div class="row">
+            <button class="btn" onclick="runPuter()">▶ Run Puter.js (no key)</button>
+            <button class="btn" onclick="copyOut()">📋 Copy result</button>
+          </div>
+          <p style="margin:8px 0 4px 0;"><b>Output</b></p>
+          <textarea id="out" class="out" placeholder="Result will appear here..."></textarea>
+
+          <script>
+          const model  = {json.dumps(frontend_model)};
+          const prompt = {json.dumps(_prompt)};
+
+          // Update sign-in status label
+          async function updateStatus() {{
+            const signed = await puter.auth.isSignedIn();
+            document.getElementById('status').textContent = signed ? "Signed in" : "Not signed in";
+          }}
+
+          async function ensureAuth() {{
+            const signed = await puter.auth.isSignedIn();
+            if (!signed) {{
+              // Try to create a temp/guest user to avoid full signup
+              await puter.auth.signIn({{ attempt_temp_user_creation: true }});
+            }}
+          }}
+
+          document.getElementById('signin').addEventListener('click', async () => {{
+            try {{
+              await puter.auth.signIn({{ attempt_temp_user_creation: true }});
+              await updateStatus();
+              alert("You're signed in. You can run the model now.");
+            }} catch (e) {{
+              alert("Sign-in failed: " + (e && e.message ? e.message : e));
+            }}
+          }});
+
+          async function runPuter() {{
+            const out = document.getElementById('out');
+            out.value = "Preparing...";
+            try {{
+              // Ensure auth is completed from this user-initiated click
+              await ensureAuth();
+              await updateStatus();
+              out.value = "Running Puter.js with model: " + model + "...";
+
+              // Correct Puter.js call
+              const r = await puter.ai.chat([
+                {{ role: "system", content: "You are an expert resume optimizer who makes minimal, targeted changes." }},
+                {{ role: "user", content: prompt }}
+              ], {{ model: model, temperature: 0.5, max_tokens: 2500 }});
+
+              let text = "";
+              if (typeof r === "string")       text = r;
+              else if (r?.message?.content)    text = r.message.content;
+              else if (r?.text)                text = r.text;
+              else                             text = JSON.stringify(r);
+              out.value = text || "No content received.";
+            }} catch (e) {{
+              out.value = "Error: " + (e && e.message ? e.message : e);
+            }}
+          }}
+
+          async function copyOut() {{
+            const out = document.getElementById('out');
+            try {{
+              await navigator.clipboard.writeText(out.value);
+              alert("Copied to clipboard!");
+            }} catch (e) {{
+              alert("Copy failed: " + (e && e.message ? e.message : e));
+            }}
+          }}
+
+          updateStatus();
+          </script>
+        </body>
+        </html>
+        """, height=420, scrolling=True)
+
+        pasted = st.text_area("Paste output here, then click “Use this result”:", height=200, key="puter_js_paste")
+        if st.button("✅ Use this result", use_container_width=True):
+            if pasted and pasted.strip():
+                st.session_state.enhanced_resume = pasted.strip()
+                st.session_state.enhanced_ats_score = calculate_ats_score(
+                    st.session_state.enhanced_resume,
+                    st.session_state.job_description
+                )
+                st.session_state.current_version += 1
+                save_to_history(st.session_state.enhanced_resume, st.session_state.enhanced_ats_score, st.session_state.current_version)
+                st.success("Imported browser-side Puter.js output into the app.")
+                st.rerun()
+            else:
+                st.warning("Please paste the Puter.js output above first.")
 
 # Download Section
 if st.session_state.enhanced_resume:

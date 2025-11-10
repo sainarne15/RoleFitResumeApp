@@ -8,6 +8,8 @@ import re
 import json
 from datetime import datetime
 import difflib
+from docx import Document
+import requests
 
 # Page config
 st.set_page_config(
@@ -39,15 +41,49 @@ if 'resume_filename' not in st.session_state:
 
 # Helper Functions
 def extract_text_from_pdf(pdf_file):
-    """Extract text from uploaded PDF file"""
+    """Extract text from uploaded PDF file with improved handling"""
     try:
         pdf_reader = PyPDF2.PdfReader(pdf_file)
         text = ""
-        for page in pdf_reader.pages:
-            text += page.extract_text() + "\n"
+        for page_num, page in enumerate(pdf_reader.pages):
+            try:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+            except Exception as e:
+                st.warning(f"Could not extract text from page {page_num + 1}: {str(e)}")
+
+        if not text.strip():
+            st.error("No text could be extracted from the PDF. The PDF might be image-based or corrupted.")
+            return ""
+
         return text.strip()
     except Exception as e:
         st.error(f"Error reading PDF: {str(e)}")
+        return ""
+
+
+def extract_text_from_word(docx_file):
+    """Extract text from uploaded Word document"""
+    try:
+        doc = Document(docx_file)
+        text = ""
+        for paragraph in doc.paragraphs:
+            text += paragraph.text + "\n"
+
+        # Also extract text from tables
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    text += cell.text + "\n"
+
+        if not text.strip():
+            st.error("No text could be extracted from the Word document.")
+            return ""
+
+        return text.strip()
+    except Exception as e:
+        st.error(f"Error reading Word document: {str(e)}")
         return ""
 
 
@@ -132,6 +168,120 @@ def calculate_ats_score(resume_text, job_description):
     return round(min(score, max_score), 1)
 
 
+def call_puter(resume, job_desc, model="gpt-4o"):
+    """Call Puter AI API (free proxy for OpenAI and Claude)"""
+    try:
+        original_word_count = len(resume.split())
+
+        prompt = f"""You are an expert resume writer and ATS optimization specialist. Your goal is to make STRATEGIC, TARGETED enhancements while preserving the resume's core structure and strong existing content.
+
+Job Description:
+{job_desc}
+
+Current Resume (Word count: {original_word_count}):
+{resume}
+
+ENHANCEMENT STRATEGY (CRITICAL - FOLLOW EXACTLY):
+
+1. ANALYZE THE JOB DESCRIPTION - Extract Keywords Dynamically:
+   • Identify ALL key technologies, tools, frameworks, libraries mentioned in the JD
+   • Note methodologies (e.g., Agile, TDD, CI/CD, DevOps)
+   • Find required soft skills and domain knowledge
+   • Identify industry-specific buzzwords and terminology
+   • Look for process terms (SDLC, architecture standards, compliance, etc.)
+
+2. COMPARE WITH RESUME - Find Enhancement Opportunities:
+   • Which JD keywords are MISSING from the resume entirely?
+   • Which are mentioned but could be emphasized more?
+   • Which bullet points are generic and could incorporate JD language?
+   • Which sections lack specificity or metrics?
+   • IMPORTANT: Which bullet points are already strong and relevant? → LEAVE THESE UNCHANGED
+
+3. STRATEGIC KEYWORD INTEGRATION:
+   A) Summary Section:
+      - Add 3-5 of the MOST IMPORTANT keywords from the JD that align with the candidate's experience
+      - Only add if truthful based on existing work history
+
+   B) Skills Section:
+      - Add missing technologies/tools from JD that the candidate has likely used based on their experience
+      - Group related skills (e.g., if they have Jest, add similar testing tools from JD)
+      - DO NOT add skills with no basis in the experience section
+
+   C) Experience Bullets:
+      - Weave JD keywords naturally into existing accomplishments
+      - Be specific with tech stacks mentioned in JD (e.g., instead of "databases" → name specific DBs from JD)
+      - Add methodology keywords where they fit (e.g., if QA/testing mentioned, add testing methodologies from JD)
+      - Replace vague terms with specific JD language
+
+4. ENHANCEMENT RULES (What to Change):
+   ✓ Generic statements → Add JD-specific details and metrics
+   ✓ Vague tech mentions → Replace with specific tools/frameworks from JD
+   ✓ Weak action verbs → Upgrade to power verbs
+   ✓ Missing JD keywords → Integrate naturally into relevant bullets
+   ✓ Bullets without metrics → Add quantifiable results where possible
+   ✓ Process descriptions → Use JD's terminology (e.g., their SDLC language)
+
+5. PRESERVATION RULES (What NOT to Change):
+   ✗ DO NOT modify bullets that already have: strong metrics, JD-relevant keywords, specific achievements
+   ✗ DO NOT change structure: same sections, job titles, dates, company names
+   ✗ DO NOT add new experiences or fabricate achievements
+   ✗ DO NOT modify education, certifications, or awards
+   ✗ DO NOT add technologies that have no basis in experience
+
+6. LENGTH DISCIPLINE:
+   • Target: {original_word_count} words (±30 words maximum)
+   • If adding keywords increases length, compensate by:
+     - Removing filler words and redundancy
+     - Condensing less relevant bullets
+     - Combining related points
+   • Prioritize: JD-relevant content stays/expands, less relevant content condenses
+
+7. AUTHENTICITY CHECK:
+   • Every enhancement must be truthful and based on existing experience
+   • Keywords should align with work already described
+   • If a JD keyword doesn't fit the candidate's background, DO NOT force it
+   • Aim for 40-60% of content modified, leaving strong points unchanged
+
+FINAL VERIFICATION:
+- Did I preserve strong, relevant bullet points unchanged?
+- Did I extract keywords FROM THE JD (not use generic examples)?
+- Are all enhancements truthful and aligned with existing experience?
+- Is word count within {original_word_count} ± 30 words?
+- Does this resume now better match THIS SPECIFIC job description?
+
+Return ONLY the enhanced resume text with the same format and structure. No preamble, no explanations."""
+
+        headers = {
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system",
+                 "content": "You are an expert resume optimizer who extracts keywords from job descriptions and makes strategic, minimal enhancements while preserving authenticity."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.5,
+            "max_tokens": 3000
+        }
+
+        response = requests.post(
+            "https://api.puter.com/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+
+        if response.status_code == 200:
+            result = response.json()
+            return result['choices'][0]['message']['content'].strip()
+        else:
+            return f"Error calling Puter AI: {response.status_code} - {response.text}"
+
+    except Exception as e:
+        return f"Error calling Puter AI: {str(e)}"
+
 def call_openai(resume, job_desc, model="gpt-4"):
     """Call OpenAI API to enhance resume"""
     try:
@@ -204,53 +354,88 @@ def call_claude(resume, job_desc, model="claude-sonnet-4-20250514"):
         client = anthropic.Anthropic(api_key=st.session_state.api_keys['claude'])
 
         original_word_count = len(resume.split())
-        original_line_count = len([line for line in resume.split('\n') if line.strip()])
 
-        prompt = f"""You are an expert resume writer and ATS optimization specialist with a focus on SURGICAL, MINIMAL changes.
+        prompt = f"""You are an expert resume writer and ATS optimization specialist. Your goal is to make STRATEGIC, TARGETED enhancements while preserving the resume's core structure and strong existing content.
 
 Job Description:
 {job_desc}
 
-Current Resume (Word count: {original_word_count}, Lines: {original_line_count}):
+Current Resume (Word count: {original_word_count}):
 {resume}
 
-CRITICAL INSTRUCTIONS - READ CAREFULLY:
+ENHANCEMENT STRATEGY (CRITICAL - FOLLOW EXACTLY):
 
-1. LENGTH PRESERVATION (MANDATORY):
-   - Target: EXACTLY {original_word_count} words (±30 words max)
-   - Target: EXACTLY {original_line_count} lines (±3 lines max)
-   - DO NOT add new bullet points that increase length
-   - If you enhance something, condense something else
+1. ANALYZE THE JOB DESCRIPTION - Extract Keywords Dynamically:
+   • Identify ALL key technologies, tools, frameworks, libraries mentioned in the JD
+   • Note methodologies (e.g., Agile, TDD, CI/CD, DevOps)
+   • Find required soft skills and domain knowledge
+   • Identify industry-specific buzzwords and terminology
+   • Look for process terms (SDLC, architecture standards, compliance, etc.)
 
-2. SELECTIVE ENHANCEMENT ONLY:
-   - Identify which bullet points/sections are ALREADY strong and relevant → LEAVE THEM EXACTLY AS IS
-   - Identify which bullet points are weak, generic, or irrelevant → ONLY modify these
-   - Do NOT change points that already have keywords, metrics, and relevance
-   - Change ONLY what needs changing - aim for 30-50% of content modified, not 100%
+2. COMPARE WITH RESUME - Find Enhancement Opportunities:
+   • Which JD keywords are MISSING from the resume entirely?
+   • Which are mentioned but could be emphasized more?
+   • Which bullet points are generic and could incorporate JD language?
+   • Which sections lack specificity or metrics?
+   • IMPORTANT: Which bullet points are already strong and relevant? → LEAVE THESE UNCHANGED
 
-3. WHAT TO MODIFY:
-   - Generic statements without metrics → Add quantifiable results
-   - Points missing job-relevant keywords → Weave in natural keywords
-   - Weak action verbs → Replace with stronger ones
-   - Irrelevant experiences → Make more concise or replace focus
+3. STRATEGIC KEYWORD INTEGRATION:
+   A) Summary Section:
+      - Add 3-5 of the MOST IMPORTANT keywords from the JD that align with the candidate's experience
+      - Only add if truthful based on existing work history
 
-4. WHAT NOT TO MODIFY:
-   - Points that already match the job description well
-   - Statements that already have metrics and strong verbs
-   - Technical skills that are already listed clearly
-   - Contact information and headers
+   B) Skills Section:
+      - Add missing technologies/tools from JD that the candidate has likely used based on their experience
+      - Group related skills (e.g., if they have Jest, add similar testing tools from JD)
+      - DO NOT add skills with no basis in the experience section
 
-5. PRESERVATION RULES:
-   - Keep the EXACT same structure (sections, job titles, dates)
-   - Maintain the same number of roles/positions
-   - Keep the same formatting style
-   - NO fabrication - only enhance existing truths
+   C) Experience Bullets:
+      - Weave JD keywords naturally into existing accomplishments
+      - Be specific with tech stacks mentioned in JD (e.g., instead of "databases" → name specific DBs from JD)
+      - Add methodology keywords where they fit (e.g., if QA/testing mentioned, add testing methodologies from JD)
+      - Replace vague terms with specific JD language
 
-Return ONLY the enhanced resume maintaining the same format and structure."""
+4. ENHANCEMENT RULES (What to Change):
+   ✓ Generic statements → Add JD-specific details and metrics
+   ✓ Vague tech mentions → Replace with specific tools/frameworks from JD
+   ✓ Weak action verbs → Upgrade to power verbs
+   ✓ Missing JD keywords → Integrate naturally into relevant bullets
+   ✓ Bullets without metrics → Add quantifiable results where possible
+   ✓ Process descriptions → Use JD's terminology (e.g., their SDLC language)
+
+5. PRESERVATION RULES (What NOT to Change):
+   ✗ DO NOT modify bullets that already have: strong metrics, JD-relevant keywords, specific achievements
+   ✗ DO NOT change structure: same sections, job titles, dates, company names
+   ✗ DO NOT add new experiences or fabricate achievements
+   ✗ DO NOT modify education, certifications, or awards
+   ✗ DO NOT add technologies that have no basis in experience
+
+6. LENGTH DISCIPLINE:
+   • Target: {original_word_count} words (±30 words maximum)
+   • If adding keywords increases length, compensate by:
+     - Removing filler words and redundancy
+     - Condensing less relevant bullets
+     - Combining related points
+   • Prioritize: JD-relevant content stays/expands, less relevant content condenses
+
+7. AUTHENTICITY CHECK:
+   • Every enhancement must be truthful and based on existing experience
+   • Keywords should align with work already described
+   • If a JD keyword doesn't fit the candidate's background, DO NOT force it
+   • Aim for 40-60% of content modified, leaving strong points unchanged
+
+FINAL VERIFICATION:
+- Did I preserve strong, relevant bullet points unchanged?
+- Did I extract keywords FROM THE JD (not use generic examples)?
+- Are all enhancements truthful and aligned with existing experience?
+- Is word count within {original_word_count} ± 30 words?
+- Does this resume now better match THIS SPECIFIC job description?
+
+Return ONLY the enhanced resume text with the same format and structure. No preamble, no explanations."""
 
         response = client.messages.create(
             model=model,
-            max_tokens=2500,
+            max_tokens=3000,
             messages=[
                 {"role": "user", "content": prompt}
             ]
@@ -275,58 +460,74 @@ def save_to_history(resume_text, score, version_num):
 
 
 def highlight_changes(original_text, enhanced_text):
-    """Highlight changes between original and enhanced text using word-level diff"""
+    """Highlight changes between original and enhanced text using improved diff algorithm"""
     if not original_text or not enhanced_text:
         return enhanced_text
+
+    # Normalize whitespace for better comparison
+    original_text = original_text.strip()
+    enhanced_text = enhanced_text.strip()
 
     # Split into lines
     original_lines = original_text.split('\n')
     enhanced_lines = enhanced_text.split('\n')
 
-    # Create a differ
-    differ = difflib.Differ()
-
     result_html = []
 
-    # Compare line by line
-    for orig_line, enh_line in zip(original_lines, enhanced_lines):
-        if orig_line.strip() == enh_line.strip():
-            # Line unchanged
-            result_html.append(enh_line)
-        else:
-            # Line changed - do word-level comparison
-            orig_words = orig_line.split()
-            enh_words = enh_line.split()
+    # Use SequenceMatcher to compare lines
+    line_matcher = difflib.SequenceMatcher(None, original_lines, enhanced_lines)
 
-            # Use SequenceMatcher for word-level diff
-            matcher = difflib.SequenceMatcher(None, orig_words, enh_words)
+    for tag, i1, i2, j1, j2 in line_matcher.get_opcodes():
+        if tag == 'equal':
+            # Lines are identical
+            for line in enhanced_lines[j1:j2]:
+                result_html.append(line)
 
-            line_result = []
-            for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-                if tag == 'equal':
-                    # Words unchanged
-                    line_result.append(' '.join(enh_words[j1:j2]))
-                elif tag == 'replace':
-                    # Words replaced - show new in green
-                    replaced_text = ' '.join(enh_words[j1:j2])
-                    line_result.append(
-                        f'<span style="background-color: #90EE90; color: #000; padding: 2px 4px; border-radius: 3px;">{replaced_text}</span>')
-                elif tag == 'insert':
-                    # Words added - show in green
-                    inserted_text = ' '.join(enh_words[j1:j2])
-                    line_result.append(
-                        f'<span style="background-color: #90EE90; color: #000; padding: 2px 4px; border-radius: 3px;">{inserted_text}</span>')
-                elif tag == 'delete':
-                    # Words deleted from original - don't show in enhanced
-                    pass
+        elif tag == 'replace':
+            # Lines were modified - do word-level comparison
+            for orig_idx, enh_idx in zip(range(i1, i2), range(j1, j2)):
+                if orig_idx < len(original_lines) and enh_idx < len(enhanced_lines):
+                    orig_line = original_lines[orig_idx]
+                    enh_line = enhanced_lines[enh_idx]
 
-            result_html.append(' '.join(line_result))
+                    # If lines are very similar (>70% match), do word-level diff
+                    similarity = difflib.SequenceMatcher(None, orig_line, enh_line).ratio()
 
-    # Handle case where enhanced has more lines
-    if len(enhanced_lines) > len(original_lines):
-        for line in enhanced_lines[len(original_lines):]:
-            result_html.append(
-                f'<span style="background-color: #90EE90; color: #000; padding: 2px 4px; border-radius: 3px;">{line}</span>')
+                    if similarity > 0.3:  # Lines are somewhat related
+                        # Word-level comparison
+                        orig_words = orig_line.split()
+                        enh_words = enh_line.split()
+
+                        word_matcher = difflib.SequenceMatcher(None, orig_words, enh_words)
+                        line_parts = []
+
+                        for word_tag, wi1, wi2, wj1, wj2 in word_matcher.get_opcodes():
+                            if word_tag == 'equal':
+                                line_parts.append(' '.join(enh_words[wj1:wj2]))
+                            elif word_tag in ('replace', 'insert'):
+                                changed_text = ' '.join(enh_words[wj1:wj2])
+                                if changed_text.strip():
+                                    line_parts.append(
+                                        f'<span style="background-color: #90EE90; font-weight: 500; padding: 1px 3px; border-radius: 2px;">{changed_text}</span>')
+
+                        result_html.append(' '.join(line_parts) if line_parts else enh_line)
+                    else:
+                        # Lines are very different - highlight entire new line
+                        result_html.append(
+                            f'<span style="background-color: #90EE90; font-weight: 500; padding: 1px 3px; border-radius: 2px;">{enh_line}</span>')
+
+        elif tag == 'insert':
+            # New lines added
+            for line in enhanced_lines[j1:j2]:
+                if line.strip():
+                    result_html.append(
+                        f'<span style="background-color: #90EE90; font-weight: 500; padding: 1px 3px; border-radius: 2px;">{line}</span>')
+                else:
+                    result_html.append(line)
+
+        elif tag == 'delete':
+            # Lines were deleted (don't show in enhanced version)
+            pass
 
     return '\n'.join(result_html)
 
@@ -373,29 +574,38 @@ with st.sidebar:
 
     st.subheader("🔑 API Keys (Persistent)")
 
-    # OpenAI API Key
-    openai_key_input = st.text_input(
-        "OpenAI API Key",
-        value=st.session_state.api_keys['openai'],
-        type="password",
-        key="openai_key_sidebar",
-        help="Your API key will be saved for this session"
+    # API Provider Selection
+    api_provider = st.radio(
+        "Select API Provider:",
+        ["OpenAI (Direct)", "Anthropic Claude (Direct)"],
+        help="Enter your API key to use the service"
     )
-    if openai_key_input:
-        st.session_state.api_keys['openai'] = openai_key_input
-        st.success("✅ OpenAI key saved")
 
-    # Claude API Key
-    claude_key_input = st.text_input(
-        "Claude API Key",
-        value=st.session_state.api_keys['claude'],
-        type="password",
-        key="claude_key_sidebar",
-        help="Your API key will be saved for this session"
-    )
-    if claude_key_input:
-        st.session_state.api_keys['claude'] = claude_key_input
-        st.success("✅ Claude key saved")
+    if api_provider == "OpenAI (Direct)":
+        # OpenAI API Key
+        openai_key_input = st.text_input(
+            "OpenAI API Key",
+            value=st.session_state.api_keys['openai'],
+            type="password",
+            key="openai_key_sidebar",
+            help="Your API key will be saved for this session"
+        )
+        if openai_key_input:
+            st.session_state.api_keys['openai'] = openai_key_input
+            st.success("✅ OpenAI key saved")
+
+    else:  # Anthropic Claude
+        # Claude API Key
+        claude_key_input = st.text_input(
+            "Claude API Key",
+            value=st.session_state.api_keys['claude'],
+            type="password",
+            key="claude_key_sidebar",
+            help="Your API key will be saved for this session"
+        )
+        if claude_key_input:
+            st.session_state.api_keys['claude'] = claude_key_input
+            st.success("✅ Claude key saved")
 
     st.markdown("---")
 
@@ -520,28 +730,47 @@ col_upload1, col_upload2 = st.columns(2)
 
 with col_upload1:
     st.write("**Upload Your Resume**")
-    resume_option = st.radio("Resume Format:", ["PDF", "Text"], horizontal=True)
+    resume_option = st.radio("Resume Format:", ["PDF", "Word", "Text"], horizontal=True)
 
     if resume_option == "PDF":
         resume_file = st.file_uploader("Choose PDF file", type=['pdf'], key="resume_pdf")
         if resume_file and resume_file.name != st.session_state.resume_filename:
             st.session_state.original_resume = extract_text_from_pdf(resume_file)
-            st.session_state.resume_filename = resume_file.name
-            st.session_state.history = []  # Reset history on new upload
-            st.session_state.current_version = 0
-            st.session_state.enhanced_resume = ""
-            if st.session_state.job_description:
-                st.session_state.original_ats_score = calculate_ats_score(
-                    st.session_state.original_resume,
-                    st.session_state.job_description
-                )
-            st.success("✅ Resume uploaded successfully! History reset.")
-            st.rerun()
-    else:
+            if st.session_state.original_resume:
+                st.session_state.resume_filename = resume_file.name
+                st.session_state.history = []
+                st.session_state.current_version = 0
+                st.session_state.enhanced_resume = ""
+                if st.session_state.job_description:
+                    st.session_state.original_ats_score = calculate_ats_score(
+                        st.session_state.original_resume,
+                        st.session_state.job_description
+                    )
+                st.success("✅ PDF uploaded successfully! History reset.")
+                st.rerun()
+
+    elif resume_option == "Word":
+        resume_file = st.file_uploader("Choose Word file", type=['docx', 'doc'], key="resume_word")
+        if resume_file and resume_file.name != st.session_state.resume_filename:
+            st.session_state.original_resume = extract_text_from_word(resume_file)
+            if st.session_state.original_resume:
+                st.session_state.resume_filename = resume_file.name
+                st.session_state.history = []
+                st.session_state.current_version = 0
+                st.session_state.enhanced_resume = ""
+                if st.session_state.job_description:
+                    st.session_state.original_ats_score = calculate_ats_score(
+                        st.session_state.original_resume,
+                        st.session_state.job_description
+                    )
+                st.success("✅ Word document uploaded successfully! History reset.")
+                st.rerun()
+
+    else:  # Text
         resume_text = st.text_area("Paste your resume text:", height=150, key="resume_text")
         if resume_text and resume_text != st.session_state.original_resume:
             st.session_state.original_resume = resume_text
-            st.session_state.history = []  # Reset history on new text
+            st.session_state.history = []
             st.session_state.current_version = 0
             st.session_state.enhanced_resume = ""
             st.session_state.resume_filename = "text_input"
@@ -582,7 +811,7 @@ with col_btn1:
         elif "Claude" in llm_provider and not st.session_state.api_keys['claude']:
             st.error("❌ Please provide your Claude API key in the sidebar!")
         else:
-            with st.spinner("✨ Enhancing your resume with minimal targeted changes..."):
+            with st.spinner("✨ Analyzing job description and enhancing your resume..."):
                 if "OpenAI" in llm_provider:
                     result = call_openai(
                         st.session_state.original_resume,
